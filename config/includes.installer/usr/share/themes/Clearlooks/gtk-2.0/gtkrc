@@ -1,0 +1,184 @@
+# KubeOS installer theme (Clearlooks), recoloured to the KubeOS brand palette.
+# Palette: base #050B05 / #0B140B, accent lime #A3F000, text #E9FFDA.
+# Only colour values were changed from the Debian-derived Clearlooks theme;
+# the style structure and widget-class assignments are untouched.
+style "clearlooks-default"
+{
+	GtkButton	::default_border	= { 0, 0, 0, 0 }
+	GtkRange	::trough_border		= 0
+	GtkPaned	::handle_size		= 6
+	GtkRange	::slider_width		= 15
+	GtkRange	::stepper_size		= 15
+
+	GtkScrollbar	::min_slider_length	= 30
+	GtkCheckButton	::indicator_size	= 14
+	GtkMenuBar	::internal-padding	= 0
+	GtkTreeView	::expander_size		= 14
+	GtkExpander	::expander_size		= 16
+	GtkScale	::slider-length		= 27
+
+	GtkButton	::child-displacement-x = 1
+	GtkButton	::child-displacement-y = 1
+
+	WnckTasklist	::fade-overlay-rect = 0
+
+	xthickness = 1
+	ythickness = 1
+
+	# text on the dark base
+	fg[NORMAL]		= "#e9ffda"
+	fg[PRELIGHT]		= "#3f6b00" # dark lime: used on light prelight backgrounds
+	fg[SELECTED]		= "#061000" # near-black on top of the lime selection
+	fg[ACTIVE]		= "#e9ffda"
+	fg[INSENSITIVE]		= "#56604f"
+
+	bg[NORMAL]		= "#050b05" # KubeOS near-black
+	bg[PRELIGHT]		= "#f2fbea" # light context (inherited widgets)
+	bg[SELECTED]		= "#a3f000" # KubeOS lime: selection AND progress-bar fill
+	bg[INSENSITIVE]		= "#dde7d6"
+	bg[ACTIVE]		= "#1a2a0a" # pressed: dark, so white/light text stays readable
+
+	base[NORMAL]		= "#0b140b"
+	base[PRELIGHT]		= "#14300a"
+	base[ACTIVE]		= "#2e4d00"
+	base[SELECTED]		= "#a3f000"
+	base[INSENSITIVE]	= "#dde7d6"
+
+	text[NORMAL]		= "#e9ffda"
+	text[PRELIGHT]		= "#dbff7a"
+	text[ACTIVE]		= "#dbff7a"
+	text[SELECTED]		= "#061000"
+	text[INSENSITIVE]	= "#56604f"
+
+	engine "clearlooks"
+	{
+	scrollbar_color	= "#a3f000"
+	menubarstyle		= 2	# 0 = flat, 1 = sunken, 2 = flat gradient
+	progressbarstyle	= 1	# 0 = candy bar, 1 = fancy candy bar, 2 = flat
+	animation		= FALSE
+	}
+}
+
+style "clearlooks-wide" = "clearlooks-default"
+{
+	xthickness = 2
+	ythickness = 2
+}
+
+style "clearlooks-wider" = "clearlooks-default"
+{
+	xthickness = 3
+	ythickness = 3
+}
+
+style "clearlooks-button" = "clearlooks-wider"
+{
+	bg[NORMAL]	= "#101a10"
+	bg[INSENSITIVE]	= "#1f2a1b"
+	bg[PRELIGHT]	= "#1e3508"
+	# buttons are dark, so their hover text must be light (the inherited
+	# fg[PRELIGHT] is a dark lime meant for light backgrounds)
+	fg[PRELIGHT]	= "#dbff7a"
+	fg[INSENSITIVE]	= "#8fa383"
+}
+
+style "clearlooks-notebook" = "clearlooks-wide"
+{
+	bg[NORMAL]	= "#0b140b"
+	bg[INSENSITIVE] = "#0b140b"
+}
+
+style "clearlooks-tasklist" = "clearlooks-default"
+{
+	xthickness = 5
+	ythickness = 3
+}
+
+style "clearlooks-menu" = "clearlooks-default"
+{
+	xthickness = 2
+	ythickness = 1
+	bg[NORMAL] = "#0b140b"
+}
+
+style "clearlooks-menubar-item" = "clearlooks-button"
+{
+	fg[PRELIGHT] = "#a3f000"
+}
+
+style "clearlooks-menu-item" = "clearlooks-default"
+{
+	xthickness	= 2
+	ythickness	= 3
+	fg[PRELIGHT]	= "#a3f000"
+	text[PRELIGHT]	= "#a3f000"
+}
+
+style "clearlooks-tree" = "clearlooks-default"
+{
+	xthickness = 2
+	ythickness = 2
+}
+
+style "clearlooks-frame-title" = "clearlooks-default"
+{
+	fg[NORMAL] = "#a3f000" # lime frame titles
+}
+
+style "clearlooks-tooltips" = "clearlooks-default"
+{
+	xthickness = 4
+	ythickness = 4
+	bg[NORMAL] = "#0b140b"
+}
+
+style "clearlooks-progressbar" = "clearlooks-wide"
+{
+	xthickness	= 1
+	ythickness	= 1
+	# the fill itself is bg[SELECTED] (lime); this is the text drawn on it
+	fg[PRELIGHT]	= "#061000"
+}
+
+style "clearlooks-combo" = "clearlooks-button"
+{
+}
+
+# parent style fixed: "blackrock-default" does not exist in this tree
+style "clearlooks-menubar" = "clearlooks-default"
+{
+	bg[NORMAL]	= "#0b140b"
+}
+
+# widget styles
+class "GtkWidget"	style "clearlooks-default"
+class "GtkButton"	style "clearlooks-button"
+class "GtkScale"	style "clearlooks-button"
+class "GtkCombo"	style "clearlooks-button"
+class "GtkRange"	style "clearlooks-wide"
+class "GtkFrame"	style "clearlooks-wide"
+class "GtkMenu"		style "clearlooks-menu"
+class "GtkEntry"	style "clearlooks-wider"
+class "GtkMenuItem"	style "clearlooks-menu-item"
+class "GtkNotebook"	style "clearlooks-notebook"
+class "GtkProgressBar"	style "clearlooks-progressbar"
+
+widget_class "*MenuItem.*"			style "clearlooks-menu-item"
+
+# combobox stuff
+widget_class "*.GtkComboBox.GtkButton"		style "clearlooks-combo"
+widget_class "*.GtkCombo.GtkButton"		style "clearlooks-combo"
+# tooltips stuff
+widget_class "*.tooltips.*.GtkToggleButton"	style "clearlooks-tasklist"
+widget "gtk-tooltips"				style "clearlooks-tooltips"
+
+# treeview stuff
+widget_class "*.GtkTreeView.GtkButton"		style "clearlooks-tree"
+widget_class "*.GtkCTree.GtkButton"		style "clearlooks-tree"
+widget_class "*.GtkList.GtkButton"		style "clearlooks-tree"
+widget_class "*.GtkCList.GtkButton"		style "clearlooks-tree"
+widget_class "*.GtkFrame.GtkLabel"		style "clearlooks-frame-title"
+
+# notebook stuff
+widget_class "*.GtkNotebook.*.GtkEventBox"	style "clearlooks-notebook"
+widget_class "*.GtkNotebook.*.GtkViewport"	style "clearlooks-notebook"

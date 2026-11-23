@@ -1,0 +1,18 @@
+# Overrides /usr/share/live/build/bootloaders/syslinux_common/live.cfg.in
+# (live-build copies config/bootloaders/syslinux_common/* over the stock files).
+# The labels are the only change: same placeholders, KubeOS wording.
+#
+# Placeholders are substituted by binary_syslinux:
+#   @FLAVOUR@ -> kubeos           @LINUX@ -> /live/vmlinuz
+#   @INITRD@  -> /live/initrd.img @APPEND_LIVE@ -> --bootappend-live
+# No "menu default" here on purpose: the timeout default is the graphical
+# installer, which is marked "menu default" in config/bootloaders/isolinux/isolinux.cfg.
+# The flavour stays in the internal label (live-<flavour>, which is what syslinux keys on)
+# but NOT in the text a user reads: since KubeOS ships its own kernel (2026-11-22) the
+# flavour is "kubeos", and "KubeOS Live (kubeos)" says the product name twice.
+
+label live-@FLAVOUR@
+	menu label ^KubeOS Live
+	linux @LINUX@
+	initrd @INITRD@
+	append @APPEND_LIVE@

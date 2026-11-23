@@ -1,0 +1,39 @@
+# These packages are required by the installer to install the system in UEFI mode
+
+#if ARCHITECTURES i386
+grub-efi-ia32-bin
+grub-efi-ia32
+grub-efi-ia32-signed
+shim-helpers-i386-signed
+#endif
+
+#if ARCHITECTURES amd64
+grub-efi
+grub-efi-amd64-bin
+grub-efi-amd64
+grub-efi-amd64-signed
+shim-helpers-amd64-signed
+#endif
+
+# Common UEFI packages
+mokutil
+shim-unsigned
+shim-signed-common
+shim-signed
+
+# Additional UEFI packages (adjust based on distribution and requirements)
+# e.g., for Ubuntu-based systems, you might include 'secureboot-db'
+# secureboot-db
+
+# fwupd was here; removed 2026-11-07 (the AGENTS audit recorded it as removed, but
+# the entry had come back). It is a desktop firmware-update daemon: useless in the
+# installer, and it drags in libxmlb/libjcat/libgusb/libqmi/libmbim/libarchive.
+
+# Additional tools for UEFI systems (adjust based on distribution and requirements)
+efibootmgr
+
+# kbd was here only for setvtrgb, which recoloured the text-mode installer's
+# console palette. That installer entry is gone (2026-11-09), so the package, its
+# /etc/vtrgb palette and /usr/bin/kubeos-vtrgb went with it. Keyboard maps come
+# from d-i's own console-keymaps udebs and never needed this package.
+

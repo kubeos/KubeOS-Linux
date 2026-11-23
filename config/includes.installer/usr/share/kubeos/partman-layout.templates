@@ -1,0 +1,74 @@
+# KubeOS: questions for the guided disk layout (Proxmox-VE style).
+#
+# WHEN   Loaded by main-menu at installer start-up
+#        (usr/lib/main-menu.d/94-kubeos-layout), before any screen is drawn.
+# WHY    The installer asks five things and builds everything else itself: the
+#        1 MiB bios_grub area, the EFI partition, the LVM volume group and the
+#        root/swap logical volumes. cdebconf silently drops a question that was
+#        never loaded, so these must be registered before partman starts.
+#        Where the layout comes from: usr/lib/partman/init.d/06-kubeos-layout.
+# SAFE   Data only: no code runs from this file.
+#
+# Wording rule (user decision, 2026-11-09): swap and root get a bare label with
+# no explanation; only minfree and maxdata carry a one-line meaning. Do not add
+# explanatory paragraphs back to the others.
+#
+# Choices of kubeos/layout-disk are supplied at run time with db_subst DISKS
+# (the same ${VARIABLE} mechanism grub-installer uses for its device list).
+# A comma separates choices, so the script strips commas from disk models.
+
+Template: kubeos/layout-disk
+Type: select
+Choices: ${DISKS}
+Description: Disk:
+
+Template: kubeos/layout-disk-info
+Type: note
+Description: ${DISK}: ${SIZE} total, ${USABLE} usable.
+
+Template: kubeos/layout-swap
+Type: string
+Description: Swap size (GiB):
+
+Template: kubeos/layout-root
+Type: string
+Description: Root size (GiB):
+
+Template: kubeos/layout-minfree
+Type: string
+Description: Minfree (GiB), minimum amount of hdsize that must remain unused:
+
+Template: kubeos/layout-maxdata
+Type: string
+Description: Maxdata (GiB), size of the data partition for pods and containers:
+
+Template: kubeos/layout-bad-number
+Type: error
+Description: Enter a whole number of GiB.
+
+Template: kubeos/layout-root-small
+Type: error
+Description: Root must be at least ${MIN} GiB.
+
+Template: kubeos/layout-does-not-fit
+Type: critical
+Description: Does not fit on ${DISK}.
+ swap ${SWAP} + root ${ROOT} + minfree ${MINFREE} + maxdata ${MAXDATA} (GiB) exceeds the ${USABLE} GiB usable on this disk.
+
+Template: kubeos/layout-data-small
+Type: critical
+Description: Not enough left for maxdata: ${LEFT} GiB available, ${MIN} GiB minimum.
+
+Template: kubeos/layout-no-disk
+Type: critical
+Description: No fixed disk found.
+
+# Shown only when partman refuses an answer this installer wrote itself. It
+# exists so a silent fall-back to partman's own guided menu is impossible: the
+# user gets the exact question and the value partman actually stored, which is
+# what a bug report needs. See init.d/06-kubeos-layout, section 6.
+Template: kubeos/layout-not-accepted
+Type: critical
+Description: The installer could not hand its layout to partman.
+ ${QUESTION} was set to "${WANTED}" but partman has "${GOT}".
+ The disk will not be partitioned automatically.

@@ -1,0 +1,230 @@
+# KubeOS system package list (chroot stage: live session + installed system).
+#
+# KubeOS is a CLI container platform, not a desktop. Before adding anything here,
+# measure what it drags in:
+#
+#     ssh root@<node> 'apt-get -s install <pkg>'      # or -s --purge autoremove
+#
+# A single careless entry can cost hundreds of MiB. Measured on a running node on
+# 2026-11-07: laptop-mode-tools pulled Python3 + the whole Qt5 stack (97 MiB in 31
+# packages) and libkpmcore12 pulled Qt6 + mesa + LLVM (97 MiB in 34 packages). Both
+# were removed, together with udisks2/libblockdev (12 MiB), aptitude (23 MiB) and
+# util-linux-locales (13.7 MiB). Do not list libraries either (lib<name><n>): they
+# arrive as dependencies, and naming them pins a soname that changes between
+# releases.
+
+#System
+bash
+bash-completion
+sudo
+hostname
+zstd
+console-setup
+vim
+smartmontools
+# NIC diagnostics: not installed by anything else, and the first thing needed when
+# a node loses its link. Small on purpose; laptop-mode-tools used to provide it.
+ethtool
+# iw: the wireless counterpart of ethtool (scan, link quality, channel). nmcli can
+# scan without it, but nothing installs iw by default and every wifi debugging
+# session starts with it.
+iw
+# Operator toolkit: what an admin actually reaches for when something is wrong. Measured on
+# a node on 2026-11-20: curl 518 KB, jq 125 KB, unzip 387 KB, htop ~200 KB, strace ~1 MB,
+# net-tools ~250 KB, systemd-coredump ~250 KB - about 2.7 MB in total, and none of them drags
+# in a second runtime. curl is not optional: the user guide tells people to run
+# `sudo curl -fsSL ...` to restore the archive key, and with wget alone that instruction failed
+# on a freshly installed node (measured 2026-11-20).
+curl
+jq
+unzip
+htop
+strace
+# net-tools: `netstat`, for muscle memory. `ss` is already there and is the better tool; this
+# exists because every how-to on the internet says netstat.
+net-tools
+# systemd-coredump: a crashing service otherwise leaves nothing to inspect, only "exited with
+# status 2" in the journal. Its disk use is capped by /etc/systemd/coredump.conf.d/99-kubeos.conf
+# (shipped by kubeos-base), because systemd's defaults are 32 GB for ONE dump and no total limit.
+systemd-coredump
+# unattended-upgrades: security patches have to arrive without a human. Its policy is set by
+# kubeos-base (/etc/apt/apt.conf.d/52kubeos-unattended-upgrades.conf): trixie-security ONLY, and
+# the KubeOS and Kubernetes packages blacklisted so a pinned version can never move itself.
+unattended-upgrades
+lvm2
+# python3: the dashboard's host console (kubeos-console.service, deploy/binary/console.py)
+# is python3 standard library only, and /usr/bin/kubeos-node-join decodes the join string
+# with python3 too - so a node without it can neither open a Shell nor join a cluster, and
+# would discover that only when someone clicks the button. Nothing else needs it, so it is
+# named here on purpose; it is already present on the nodes tested so far, which is exactly
+# why the ISO must not rely on that.
+python3
+# xfsprogs: /usr/bin/kubeos-storage-init formats the pod-data thin volume with
+# XFS on first boot. Without this package mkfs.xfs does not exist and first boot
+# would leave pod data on the root filesystem (warn-only, so the node would still
+# come up - and the failure would only show in the journal).
+xfsprogs
+# nfs-common: the NFS *client* (mount.nfs, rpc.statd, libnfsidmap). The kernel
+# module alone is not enough - measured 2026-11-11 on an installed node: nfs.ko was
+# present but /sbin/mount.nfs was missing, so any volume of type `nfs` failed at
+# mount time with a wrong-fs-type error and the Pod never started. KubeOS does not
+# provision NFS itself (dynamic local storage is a host service, see
+# usr/bin/kubeos-storage-provisioner); this is what lets an operator attach an
+# existing export with a static PV - the example is
+# /usr/share/kubeos/examples/nfs-static-pv.yaml. No server side: this is a client.
+# Note it pulls in rpcbind (port 111, socket-activated): only NFSv3 needs it, and
+# the example recommends NFSv4.1 mounts, so the socket can be disabled on nodes that
+# never use v3. KubeOS does not disable it for you - that is a per-machine decision.
+nfs-common
+util-linux
+util-linux-extra
+fdisk
+gdisk
+parted
+memtest86+
+
+#Section: KubeOS
+# KubeOS's own content arrives as packages from https://repo.kubeos.in (see
+# config/archives/kubeos.list.chroot), not as files copied into the rootfs. This one is the
+# branding: OS identity, the installed system's GRUB menu name and the Plymouth splash. It
+# replaced config/includes.chroot/etc/{os-release,lsb-release,issue.net,motd,issue.final}, the
+# grub.d drop-in, the plymouth theme and build hook 9070. /etc/issue deliberately stays in
+# includes.chroot: it is the live session's banner and no package may own it.
+kubeos-branding
+# The commands that build a node at first boot, their config, the manifests they apply and
+# the units that run them.
+kubeos-cli
+# The pod sandbox image, so hook 9030 imports a local archive instead of pulling one.
+kubeos-pause-image
+# The metrics API, host-native so `kubectl top` works with no Pods in the cluster.
+kubeos-metrics-server
+# The pod network itself: CNI plugins, flanneld, CoreDNS, and the runtime prerequisites.
+kubeos-network
+# Dynamic local storage: the pod-data thin volume and the local-path provisioner.
+kubeos-storage
+# The five control-plane binaries plus etcd, run as host services instead of static Pods.
+kubeos-control-plane
+# The web dashboard payload (Headlamp-based), installed by its own first-boot unit.
+kubeos-dashboard
+# The host firewall: INPUT default-deny, FORWARD untouched, applied at boot and on upgrade.
+# It exists because a node with no firewall answers on whatever its components happen to open -
+# measured on 2026-11-20: rpcbind 111, CoreDNS *:8080/*:8181, etcd on the LAN address.
+kubeos-firewall
+# The metapackage: names this KubeOS version, depends on the nine above, and ships the
+# archive keyring + sources line so the node can update itself with apt.
+kubeos-base
+
+#Containerization
+containerd.io
+# Owns /etc/containerd/config.toml: generated from `containerd config default` and patched for the
+# systemd cgroup driver and the release's sandbox image. Was hook 9060 until 2026-11-20 - a build
+# hook cannot help a node whose containerd.io package is upgraded, and containerd.io's own conffile
+# disables the CRI plugin and has no `imports` line, so a drop-in cannot fix it either.
+kubeos-containerd
+# needed by kube-proxy and the kubeadm preflight checks on the installed node
+conntrack
+iptables
+socat
+
+#Section: Kube-cores
+# kubelet, kubeadm, kubectl and kubernetes-cni come from repo.kubeos.in, byte-identical to
+# the upstream 1.37.2 build, and only through this metapackage: it pins them with
+# `Depends: =`, so `apt upgrade` can never move Kubernetes past what KubeOS has vetted.
+# The pkgs.k8s.io apt source is deliberately NOT configured on a node (user decision
+# 2026-11-19) - a kubelet newer than the control plane KubeOS ships is a broken cluster.
+kubeos-kubernetes
+# cri-tools (crictl) was removed on 2026-11-13: 39 MB of optional debugging tooling that
+# nothing in the build, the first boot or the dashboard used. `kubectl` covers the normal
+# debugging path, and `crictl` is one `apt install cri-tools` away when a container-level
+# look is really needed. cri-tools is mirrored in the KubeOS archive as well, so that
+# install keeps working now that the upstream feed is gone.
+
+#Kubernetes Package manager
+# Nothing in KubeOS uses helm (the dashboard is a host release, not a chart), but it is kept
+# deliberately: operators deploy their own charts from a node, and 64 MB is cheap next to
+# asking them to install it on an offline appliance.
+helm
+
+#Section: Kernel/boot/init
+# linux-headers-amd64 was removed on 2026-11-07: nothing on a CLI node builds
+# out-of-tree modules, and the meta package dragged 206 MiB of toolchain
+# (gcc-14 68, headers-common 62, cpp-14 35, binutils, libc6-dev). Install it on a
+# node that really needs DKMS (NVIDIA, ZFS).
+# The KERNEL itself is not listed here on purpose: auto/config's --linux-packages +
+# --linux-flavours make live-build install linux-image-kubeos (the KubeOS flavour meta,
+# pinned to linux-image-6.12.117-kubeos) in the same stage that used to install Debian's
+# linux-image-amd64. Naming a kernel in this file as well would install two.
+# linux-base and kmod are named explicitly because the KubeOS kernel declares NO Depends:
+# both used to arrive only through Debian's kernel package. linux-base provides
+# /usr/bin/linux-version (used by kernel and initramfs helpers), kmod provides
+# modprobe/depmod — initramfs-tools would pull kmod in anyway, this keeps it visible.
+linux-base
+kmod
+systemd
+initramfs-tools
+syslinux-utils
+
+#Section: Boot splash
+plymouth
+# The kubeos theme draws its messages with Image.Text(), which the script plugin can
+# only render through label-pango.so -- that plugin lives in plymouth-label, NOT in
+# plymouth. Without it every update-initramfs warns
+#   "W: plymouth: The plugin label-pango.so is missing ..."
+# and boot messages (fsck, "press ESC", passphrase prompts) stay invisible.
+plymouth-label
+
+#Networking
+network-manager
+# bridge-utils (brctl) removed: iproute2's `ip link add type bridge` covers it and
+# neither Calico nor kube-proxy calls brctl.
+# ifupdown was removed on 2026-11-07: an audit of a running node showed the
+# installer's static IP is persisted as a NetworkManager keyfile
+# (/etc/NetworkManager/system-connections/, ipv4.method=manual) and
+# /etc/network/interfaces only ever contains `lo`, so ifupdown and networking.service
+# configured nothing.
+
+#Section: Firmwares
+# Wired networking only, on purpose. The full `firmware-linux-nonfree` set cost
+# 832 MiB in 40 packages on a measured node (netronome 144, iwlwifi 114, atheros 97,
+# amd-graphics 92, nvidia 157, marvell-prestera 60, mediatek 46, sof-audio 35,
+# intel-graphics 29 ...) and none of it is used by a headless CLI node: the console
+# runs on simpledrm/efifb without GPU firmware.
+#
+#   firmware-linux-free   96 KiB, the remaining free licenced firmware
+#   firmware-realtek      19 MiB, r8169/r8125 - the wired NICs a node actually has
+#
+# Per-deployment additions, e.g. for a wifi install or a Mellanox/NVIDIA box:
+#   apt install firmware-iwlwifi firmware-atheros firmware-brcm80211
+#   apt install firmware-mellanox-spectrum firmware-nvidia-graphics
+firmware-linux-free
+firmware-realtek
+# Wireless, added 2026-11-07 after the firmware trim was reviewed: a node whose
+# only uplink is wifi must still work AFTER installation (the installer itself has
+# no wpa_supplicant, so installation needs a cable - see HANDOFF.md 10.4). These
+# three cover the overwhelming majority of laptop cards; add firmware-mediatek
+# (+46 MiB) or firmware-libertas if a specific machine needs them.
+firmware-iwlwifi
+firmware-atheros
+firmware-brcm80211
+# CPU microcode is a security fix, not hardware support: keep both.
+amd64-microcode
+intel-microcode
+
+#Section: SSH
+openssh-client
+openssh-server
+
+#Section: Live system components
+# Needed by the Live entry. They also land on the installed disk, which is
+# unavoidable with `--debian-installer live`: the installed system is a copy of the
+# live root filesystem.
+live-boot
+live-config
+live-config-systemd
+systemd-sysv
+user-setup
+# live-tools is 109 KiB and part of the live boot/initramfs path (it provides
+# live-update-initramfs). Kept deliberately: removing it saves nothing worth the
+# risk of breaking the Live entry.
+live-tools
+eject

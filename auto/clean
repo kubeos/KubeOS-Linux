@@ -1,0 +1,18 @@
+#!/bin/sh
+# KubeOS: clean the build, deliberately keeping the package cache.
+#
+# RUN    sudo lb clean         (auto/clean is what `lb clean` calls itself)
+# WHY    A clean rebuild has to start from a known state, but cache/ holds every
+#        .deb already downloaded: deleting it makes each rebuild fetch gigabytes
+#        again. Stage stamps in .build/ *can* lie after a failed build, so those
+#        are removed here while the download cache is kept.
+# NOTE   After a RELEASE change the bootstrap cache is stale too; that case needs
+#        `sudo lb clean --purge && rm -rf cache/` (AGENTS.md section 11).
+set -e
+
+# Clean the build only. cache/ is deliberately kept: it holds the downloaded
+# packages and deleting it makes every rebuild download everything again.
+lb clean noauto "$@"
+
+rm -f binary.log prepare.log
+rm -rf .build

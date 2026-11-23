@@ -1,0 +1,76 @@
+#!/bin/sh
+# KubeOS: refuse to install on a machine that has no network address.
+#
+# WHEN   partman's init.d sequence, i.e. every time "Partition disks" starts,
+#        which is before anything is written to disk.
+# WHY    A single-node Kubernetes cluster is bound to the node's IP address at
+#        kubeadm init, so a machine with no network would install cleanly and
+#        then never come up as a node. d-i does not stop by itself: with no
+#        interface at all, netcfg shows a note and carries on
+#        (netcfg-common.c, num_interfaces == 0), and no later stage looks at the
+#        network again before the disk is written.
+# SAFE   Read-only: it reads /proc, the address list and /etc/resolv.conf.
+#
+# Mechanism (partman-base 237, bin/partman lines 118-136): the partman menu item
+# loops over `/lib/partman/init.d/*`, requires each to be executable, and on the
+# first non-zero exit does `db_progress STOP; abort 10`, i.e. returns to the main
+# menu without partitioning anything. That non-zero exit IS the stop.
+#
+# There is no other switch for this in d-i: `partman/early_command` cannot do it,
+# because di-utils' preseed_command runs the command with `db_go || true` as its
+# last statement and therefore always exits 0, hiding any failure from
+# 01early_command's `set -e`.
+#
+# This file MUST stay under includes.installer/usr/lib/: the d-i initrd is
+# usr-merged (`lib -> usr/lib`), so /usr/lib/partman/init.d IS
+# /lib/partman/init.d at runtime, and a real includes.installer/lib/ would
+# destroy that symlink (see the note in 90-kubeos-title).
+#
+# `05` (not `00`) only so the progress bar reads "kubeos-require-network":
+# bin/partman derives that label with `basename | sed 's/[0-9]*//'`. It still
+# runs before 10umount_target and before anything is written to disk.
+set -u
+
+log() { echo "kubeos-require-network: $*"; }
+
+# Any one of these is enough: a global IPv4 address, a default route, a
+# nameserver. Deliberately tolerant, because a false negative here would block a
+# perfectly good installation.
+have_net=0
+
+if [ -x /usr/sbin/ip ] && /usr/sbin/ip -o -4 addr show scope global 2>/dev/null | grep -q .; then
+    have_net=1
+    log "global IPv4 address present"
+fi
+
+if [ "$have_net" -eq 0 ] && [ -r /proc/net/route ] \
+   && awk 'NR > 1 && $2 == "00000000" { found = 1 } END { exit !found }' /proc/net/route; then
+    have_net=1
+    log "default route present"
+fi
+
+if [ "$have_net" -eq 0 ] && [ -s /etc/resolv.conf ] \
+   && grep -q '^nameserver' /etc/resolv.conf; then
+    have_net=1
+    log "nameserver configured"
+fi
+
+if [ "$have_net" -eq 1 ]; then
+    exit 0
+fi
+
+log "ERROR no IPv4 address, no default route and no nameserver: refusing to install"
+
+# Show the reason in the installer's own UI. Kept in a subshell on purpose:
+# sourcing confmodule exec()s a debconf frontend, so it must never be able to
+# change this script's exit status - the non-zero exit below is the whole point.
+(
+    if [ -r /usr/share/debconf/confmodule ]; then
+        # shellcheck disable=SC1091  # exists only inside the d-i initrd
+        . /usr/share/debconf/confmodule
+        db_input critical kubeos/require-network || true
+        db_go || true
+    fi
+) || true
+
+exit 1

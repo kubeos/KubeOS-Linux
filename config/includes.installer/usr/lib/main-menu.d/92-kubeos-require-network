@@ -1,0 +1,28 @@
+#!/bin/sh
+# KubeOS: register the "no network address" error message for the installer.
+#
+# WHEN   Run by main-menu at every start-up, before any screen is drawn.
+#        main-menu executes everything in /lib/main-menu.d/ and shares its debconf
+#        frontend with it (main-menu.c, menu_startup()).
+# WHY    The template must already be in the running database when partman's
+#        init.d/05kubeos-require-network calls db_input on it. A question that
+#        was never loaded is silently dropped by cdebconf, which would turn a
+#        readable stop into a mysterious one.
+# SAFE   If loading fails the install still stops (that script's exit status is
+#        what aborts partman); only the explanation is lost, so this exits 0.
+#
+# This file MUST stay under includes.installer/usr/lib/, never under
+# includes.installer/lib/: see the /lib symlink note in 90-kubeos-title.
+set -u
+
+templates=/usr/share/kubeos/require-network.templates
+[ -r "$templates" ] || exit 0
+
+# debconf-loadtemplate talks to the *running* frontend when DEBIAN_HAS_FRONTEND
+# is set; without it, it would silently edit an on-disk database nobody reads.
+[ -n "${DEBIAN_HAS_FRONTEND:-}" ] || exit 0
+
+debconf-loadtemplate kubeos "$templates" >/dev/null 2>&1 \
+    || logger -t kubeos-netguard "could not load require-network.templates"
+
+exit 0

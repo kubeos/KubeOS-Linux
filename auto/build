@@ -1,0 +1,42 @@
+#!/bin/sh
+# KubeOS: build the ISO, keeping a log, and give it the release name.
+#
+# RUN    sh auto/build        (or `lb build 2>&1 | tee build.log` by hand)
+# WHY    `noauto` stops live-build from re-running the stages that auto/config
+#        already decided; `tee` keeps build.log, which is the only record of a
+#        failed build and is gitignored on purpose.
+# WHY 2  live-build hard-codes the name of an iso-hybrid image as
+#        "<image-name>-<arch>.hybrid.iso". The ".hybrid" infix is an internal
+#        detail, and KubeOS ships "kubeos-<version>-<arch>.iso", so
+#        tools/rename-iso.sh fixes the name (and the .zsync header that repeats
+#        it) once the build has finished. Note that `lb build noauto` skips the
+#        auto/ scripts entirely, so a build started that way keeps the ".hybrid"
+#        name: build with `lb build` or with this script.
+# NOTE   Take a VM snapshot first. Nothing here needs to run as root by itself,
+#        but live-build does, so the real command is `sudo lb build`.
+set -e
+
+# THE BUILD'S EXIT STATUS MUST NOT BE LOST. In POSIX sh the status of a pipeline is the status
+# of its LAST command - `tee` - which succeeds even when `lb build` failed, so `set -e` never
+# fired and a red build walked out of here as success (measured 2026-11-13 by reading the
+# pipeline: nothing wrote the status anywhere). The status is now written from inside the
+# pipeline and re-raised below, because sh has no pipefail.
+status_file=.build-status
+rm -f "$status_file"
+# `if` is load-bearing: under `set -e` a bare failing command must not abort the subshell
+# before it has written the status (that is exactly how the first version of this fix still
+# reported 1 instead of the real code - caught by simulating a failing build).
+{ if lb build noauto "$@"; then printf '0\n' > "$status_file"
+  else printf '%s\n' "$?" > "$status_file"; fi; } 2>&1 | tee build.log
+build_status=$(cat "$status_file" 2>/dev/null || echo 1)
+rm -f "$status_file"
+if [ "$build_status" -ne 0 ]; then
+    printf '%s\n' "kubeos-build: lb build FAILED (exit $build_status) - see build.log" >&2
+    exit "$build_status"
+fi
+
+# This runs after a FINISHED build, so a problem here must warn, never abort and
+# never make a good ISO look like a failed build.
+if ! sh tools/rename-iso.sh .; then
+    printf '%s\n' "kubeos-build: WARNING: the image kept live-build's '.hybrid' name"
+fi

@@ -1,0 +1,29 @@
+#!/bin/sh
+# KubeOS: register the guided disk-layout questions for the installer.
+#
+# WHEN   Run by main-menu at every start-up, before any screen is drawn.
+#        main-menu executes everything in /lib/main-menu.d/ and shares its
+#        debconf frontend with it (main-menu.c, menu_startup()).
+# WHY    usr/lib/partman/init.d/06-kubeos-layout asks these questions later; a
+#        question that was never loaded is silently dropped by cdebconf, which
+#        would turn "the installer asks for sizes" into "the installer asks
+#        nothing and partman aborts". Exactly the same mechanism as
+#        92-kubeos-require-network.
+# SAFE   Always exits 0: the layout script fails loudly by itself if its
+#        questions are missing.
+#
+# This file MUST stay under includes.installer/usr/lib/, never under
+# includes.installer/lib/: see the /lib symlink note in 90-kubeos-title.
+set -u
+
+templates=/usr/share/kubeos/partman-layout.templates
+[ -r "$templates" ] || exit 0
+
+# debconf-loadtemplate talks to the *running* frontend when DEBIAN_HAS_FRONTEND
+# is set; without it, it would silently edit an on-disk database nobody reads.
+[ -n "${DEBIAN_HAS_FRONTEND:-}" ] || exit 0
+
+debconf-loadtemplate kubeos "$templates" >/dev/null 2>&1 \
+    || logger -t kubeos-layout "could not load partman-layout.templates"
+
+exit 0

@@ -1,0 +1,14 @@
+build.log
+push.sh
+.build
+cache
+chroot/
+binary/
+local/
+*.iso
+*.log
+live-image-*
+*.iso.zsync
+*.contents
+*.files
+*.packages

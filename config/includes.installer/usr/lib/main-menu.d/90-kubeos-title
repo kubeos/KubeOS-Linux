@@ -1,0 +1,31 @@
+#!/bin/sh
+# KubeOS: show "KubeOS installer main menu" as the installer's panel title.
+#
+# WHEN   Run by main-menu at every start-up, before the first screen is drawn.
+#        main-menu executes everything in /lib/main-menu.d/ and shares its debconf
+#        frontend with it (main-menu.c, menu_startup()).
+# WHY    d-i ships the panel title as a debconf template,
+#        debian-installer/main-menu-title, which main-menu sets from its own
+#        translation right before drawing. Replacing that template in the running
+#        database is what changes the title to KubeOS.
+# SAFE   Any failure leaves Debian's title in place, so this hook always exits 0.
+#
+# This file MUST stay under includes.installer/usr/lib/, never under
+# includes.installer/lib/: the d-i initrd is usr-merged (`lib -> usr/lib`) and
+# live-build copies this tree in with `cpio -pumd0 -u`, which unlinks that symlink
+# and mkdirs a real `lib` over it. /init is `sh -e` and dies at
+# `. /lib/debian-installer/init-debug`, so the installer then panics at 1.5 s.
+# At runtime /usr/lib/main-menu.d IS /lib/main-menu.d through the symlink.
+set -u
+
+templates=/usr/share/kubeos/main-menu-title.templates
+[ -r "$templates" ] || exit 0
+
+# debconf-loadtemplate talks to the *running* frontend when DEBIAN_HAS_FRONTEND
+# is set; without it, it would silently edit an on-disk database nobody reads.
+[ -n "${DEBIAN_HAS_FRONTEND:-}" ] || exit 0
+
+debconf-loadtemplate main-menu "$templates" >/dev/null 2>&1 \
+    || logger -t kubeos-title "could not override the installer title"
+
+exit 0

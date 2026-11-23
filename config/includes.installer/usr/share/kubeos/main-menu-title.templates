@@ -1,0 +1,17 @@
+# Title of the debian-installer main menu, as shown by the GTK and text frontends.
+#
+# main-menu calls debconf_settitle("debian-installer/main-menu-title") right
+# before it draws the menu, so the panel title is the Description of this
+# template (main-menu 1.70, main-menu.c). Loading a template with the same tag
+# replaces it completely (cdebconf rfc822db_template_set()), which also drops
+# Debian's Description-<lang> translations, so the title is KubeOS in every
+# language rather than only in English.
+#
+# Compiled format, not source format: cdebconf's template_load() matches
+# "Description: " and does not understand the "_Description:" spelling.
+#
+# Loaded by /lib/main-menu.d/90-kubeos-title at main-menu startup.
+
+Template: debian-installer/main-menu-title
+Type: text
+Description: KubeOS installer main menu

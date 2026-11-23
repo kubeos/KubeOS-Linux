@@ -1,0 +1,54 @@
+#!/bin/sh
+# KubeOS hook 9050: enable the services first boot depends on.
+#
+# WHEN   chroot stage, after the packages are installed.
+# WHY    The installed system has to come up with containerd running and kubelet
+#        enabled, but neither can be *started* here: there is no running systemd
+#        inside the chroot, and kubelet would only crash-loop until `kubeadm init`
+#        runs on first boot anyway. Enabling is all this hook does.
+# SAFE   Re-runnable: `systemctl enable` on an enabled unit is a no-op.
+#
+# node-setup.service is enabled by the relative symlink that ships in
+# config/includes.chroot/etc/systemd/system/multi-user.target.wants/, so
+# `systemctl enable` must NOT be called for it: the path already exists, systemd
+# refuses to replace it ("Failed to enable unit: File ... already exists") and
+# with `set -e` that aborts the whole build. A copy that dereferences symlinks
+# can also leave a plain text file containing "../node-setup.service", so
+# the link is repaired here and then verified the way systemd would see it.
+set -eu
+
+WANT=/etc/systemd/system/multi-user.target.wants/node-setup.service
+
+log() { echo "kubeos 9050: $*"; }
+
+if [ ! -L "$WANT" ]; then
+    log "the node-setup wants entry is missing or not a symlink, recreating it"
+    rm -f "$WANT"
+    ln -s ../node-setup.service "$WANT"
+fi
+
+log "enabling containerd and kubelet"
+systemctl enable containerd.service
+systemctl enable kubelet.service
+
+# The host control plane and DNS. flanneld is deliberately NOT in this list: its
+# kube subnet manager needs its own Pod spec, so it can only run as a DaemonSet -
+# see docs/NATIVE-CONTROL-PLANE.md D1. The unit stays in the image for a future
+# multi-node mode; a single node uses the bridge+host-local CNI written at first boot.
+#
+# The host control plane, DNS and the metrics API. Enabling them in the image is
+# what makes a REBOOT work: at first boot node-setup starts them itself, and
+# from then on systemd brings them up in dependency order. Every one of them carries
+# a ConditionPathExists on a first-boot artefact, so before the cluster exists they
+# are skipped cleanly instead of crash-looping.
+KUBEOS_UNITS="etcd kube-apiserver kube-controller-manager kube-scheduler kube-proxy kubeos-coredns kubeos-metrics-server"
+for unit in $KUBEOS_UNITS; do
+    log "enabling ${unit}.service"
+    systemctl enable "${unit}.service"
+done
+
+# Fail the build if any of the three is not enabled, rather than shipping an ISO
+# whose first boot silently does nothing.
+log "enabled state:"
+# shellcheck disable=SC2086  # the list is deliberately word-split here
+systemctl is-enabled containerd.service kubelet.service node-setup.service $KUBEOS_UNITS

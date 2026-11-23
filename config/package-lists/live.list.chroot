@@ -1,0 +1,6 @@
+
+#Section: Live system components
+live-boot
+live-config
+live-config-systemd
+systemd-sysv

@@ -1,0 +1,20 @@
+# Shown by /lib/partman/init.d/05kubeos-require-network when a machine has no
+# network address at all, so the installation is stopped instead of producing a
+# node that can never start.
+#
+# Compiled format, not source format: cdebconf's template_load() matches
+# "Description: " and does not understand the "_Description:" spelling.
+#
+# Loaded by /lib/main-menu.d/92-kubeos-require-network at main-menu startup.
+
+Template: kubeos/require-network
+Type: error
+Description: No network address on this machine
+ KubeOS is a Kubernetes platform, and the node is bound to its own IP
+ address when the cluster is created on first boot. A machine with no
+ network address would install successfully and then never come up.
+ .
+ The installer found no IPv4 address, no default route and no nameserver.
+ .
+ Connect a wired interface, or a wireless card supported by the firmware in
+ this image, and then choose "Partition disks" again.

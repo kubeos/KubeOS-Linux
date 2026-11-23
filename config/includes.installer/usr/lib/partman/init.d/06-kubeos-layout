@@ -1,0 +1,495 @@
+#!/bin/sh
+# KubeOS: ask for a disk and four sizes, then build the partman recipe.
+#
+# WHEN   partman's init.d sequence, i.e. every time "Partition disks" starts,
+#        which is before anything is written to disk. Runs once: a flag file is
+#        left behind so going back to the partition menu does not re-ask.
+# WHY    User decision 2026-11-09: a Proxmox-VE-style guided layout. The
+#        installer asks exactly five things and never shows partman's
+#        guided/manual menu or its partition list:
+#          1. disk
+#          2. swap size
+#          3. root size
+#          4. minfree  - minimum amount of hdsize that must remain unused
+#          5. maxdata  - size of the data partition used for pods/containers
+#        It then creates the GPT label, a 1 MiB bios_grub area for GRUB, the
+#        EFI partition, the LVM volume group and the root/swap logical volumes
+#        by itself. A script is needed rather than plain preseeding because a
+#        recipe is static and the sizes are the user's.
+# SAFE   Writes nothing to disk. It only answers debconf questions and writes
+#        the flag file. Every answer is validated against the real disk size; on
+#        any abort it exits non-zero, and partman-base treats a non-zero init.d
+#        exit as "stop and do not partition" (bin/partman, abort 10), so a
+#        mistake here can never destroy a disk.
+#
+# Layout produced (partition order is recipe order), hdsize = whole disk:
+#   sda1  1 MB           biosgrub  - GRUB core image, needed to boot BIOS+GPT
+#   sda2  538-1075 MB    efi       - mounted /boot/efi
+#   sda3  1024 MB..rest   lvm PV    - VG kubeos-vg (never "100%": see below)
+#          lv-swap  <swap>          swap
+#          lv-root  <root>          ext4 -> /  (also carries /boot)
+#          free     rest            first boot turns ALL of it, minus minfree,
+#                                   into the thin pool kubeos-data holding the
+#                                   thin volume pod-data, formatted XFS and
+#                                   mounted at /opt/local-path-provisioner
+#                                   (usr/bin/kubeos-storage-init). Pod data lives
+#                                   there; the base system - containerd's
+#                                   overlayfs store, the kubeadm images and every
+#                                   kube-system pod - stays on lv-root.
+#          unused   <minfree>       never allocated: the reserve the user asked
+#                                   for ("minimum amount of disk that must stay
+#                                   unused"). storage-init subtracts it from the
+#                                   free space before sizing the pool.
+#   The root and swap LVs are the only ones partman creates: partman has no
+#   concept of a thin pool, so the pool is built at first boot from the VG space
+#   this script deliberately leaves free (guided_size = root + swap, never "max"
+#   - with "max" the last LV swallows the whole volume group).
+#   maxdata is therefore advisory: it is the data size the user asked for and is
+#   recorded for /etc/kubeos/storage.conf and the journal, but the pool is sized
+#   from the real free space minus minfree, so no disk space is stranded when the
+#   two disagree.
+#
+# Why no separate /boot: GRUB's core image (with LVM support) lives in the
+# bios_grub area and loads the kernel from the root LV, so /boot needs no
+# partition of its own. partman would normally refuse a recipe with no / or
+# /boot outside LVM and ask a critical question; partman-auto-lvm/no_boot is
+# preseeded true below, which is the documented way to accept that.
+#
+# The early-exit check MUST stay before the confmodule line: sourcing
+# confmodule re-executes this script under the debconf frontend (that is how
+# every d-i script obtains db_*), and there is no point paying for that on a
+# second visit.
+set -eu
+
+FLAG=/var/lib/kubeos-installer/layout-answered
+VG=kubeos-vg
+BOOT_MB=1            # bios_grub; partman's "MB" is 10^6 bytes
+EFI_MB=538           # same size Debian's own efi-boot-lvm-root recipe uses
+EFI_MAX_MB=1075
+MIN_ROOT_GIB=8
+SWAP_CAP_GIB=8       # 2 x RAM, but never offer more than this
+RAM_TO_SWAP=2
+MINFREE_DEFAULT_GIB=8
+MIN_DATA_GIB=4       # the thin pool has to hold ~2.2 GB of baked images
+BYTES_PER_GIB=1073741824
+BYTES_PER_MB=1000000
+RECIPE_FILE=/tmp/kubeos-layout.recipe   # partman reads the recipe from a file
+
+# Two outputs on purpose: stdout is what the installer log collects, logger
+# puts the same line in syslog where Alt+F4 shows it without any digging.
+log() {
+    echo "kubeos-layout: $*"
+    logger -t kubeos-layout "$*" 2>/dev/null || true
+}
+
+if [ -e "$FLAG" ]; then
+    log "layout already answered in this installation; not asking again"
+    exit 0
+fi
+
+# shellcheck disable=SC1091  # exists only inside the d-i initrd
+. /usr/share/debconf/confmodule
+
+is_uint() {
+    case ${1:-} in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+# gib_to_mb N: GiB -> partman megabytes (decimal), so a 20 GiB root really is
+# 20 GiB on disk. Integer division loses at most one megabyte.
+gib_to_mb() {
+    echo "$(( $1 * BYTES_PER_GIB / BYTES_PER_MB ))"
+}
+
+mb_to_gib() {
+    # rounded, not truncated: 21474 MB is 20 GiB, not 19
+    echo "$(( ($1 * BYTES_PER_MB + BYTES_PER_GIB / 2) / BYTES_PER_GIB ))"
+}
+
+# bad_number VALUE: complain about a non-numeric answer.
+bad_number() {
+    db_subst kubeos/layout-bad-number VALUE "${1:-}"
+    db_fset kubeos/layout-bad-number seen false
+    db_input critical kubeos/layout-bad-number || true
+    db_go || true
+}
+
+does_not_fit() {
+    # an error may spell out the numbers: the prompts stay terse, but a refusal
+    # has to say which sum was too big or the user cannot fix it.
+    db_subst kubeos/layout-does-not-fit DISK "$picked"
+    db_subst kubeos/layout-does-not-fit USABLE "$(mb_to_gib "$usable_mb")"
+    db_subst kubeos/layout-does-not-fit SWAP "${swap_gib:-0}"
+    db_subst kubeos/layout-does-not-fit ROOT "${root_gib:-0}"
+    db_subst kubeos/layout-does-not-fit MINFREE "${minfree_gib:-0}"
+    db_subst kubeos/layout-does-not-fit MAXDATA "${maxdata_gib:-0}"
+    db_fset kubeos/layout-does-not-fit seen false
+    db_input critical kubeos/layout-does-not-fit || true
+    db_go || true
+}
+
+# ---- 1. which fixed disks are there ----------------------------------------
+# sysfs only: no parted, no lsblk, nothing that can hang on a dead device.
+disks=""
+disk_table=""
+for sysdev in /sys/block/*; do
+    name=${sysdev##*/}
+    case $name in
+        loop*|ram*|zram*|sr*|fd*|dm-*|md*|nbd*|zd*|mmcblk*boot*|mmcblk*rpmb)
+            continue ;;
+    esac
+    # a real disk has a backing device; the installation medium does not
+    [ -e "$sysdev/device" ] || continue
+    [ "$(cat "$sysdev/removable" 2>/dev/null || echo 1)" = "0" ] || continue
+    sectors=$(cat "$sysdev/size" 2>/dev/null || echo 0)
+    is_uint "$sectors" || continue
+    [ "$sectors" -gt 0 ] || continue
+    # 512-byte sectors -> megabytes
+    disk_mb=$(( sectors * 512 / BYTES_PER_MB ))
+    [ "$disk_mb" -ge 2048 ] || continue
+    model=$(cat "$sysdev/device/model" 2>/dev/null || true)
+    model=$(printf '%s' "$model" | tr -d ',' | tr -s ' ')
+    label="/dev/${name} ($(mb_to_gib "$disk_mb") GiB${model:+, $model})"
+    disks="${disks:+$disks, }$label"
+    disk_table="${disk_table}${name} ${disk_mb}
+"
+done
+
+if [ -z "$disks" ]; then
+    log "ERROR no fixed disk found (only removable or virtual devices)"
+    db_input critical kubeos/layout-no-disk || true
+    db_go || true
+    exit 1
+fi
+
+# ---- 2. the disk -----------------------------------------------------------
+db_fset kubeos/layout-disk seen false
+db_subst kubeos/layout-disk DISKS "$disks"
+db_input high kubeos/layout-disk || true
+db_go || { log "aborted at disk selection"; exit 1; }
+db_get kubeos/layout-disk
+picked=$(printf '%s' "$RET" | awk '{print $1}')
+picked_name=${picked#/dev/}
+
+disk_mb=$(printf '%s' "$disk_table" | awk -v n="$picked_name" '$1 == n { print $2 }')
+if [ -z "$disk_mb" ]; then
+    log "ERROR '$picked' is not one of the disks offered; refusing to guess"
+    exit 1
+fi
+
+usable_mb=$(( disk_mb - BOOT_MB - EFI_MB ))
+log "disk $picked: ${disk_mb} MB total, ${usable_mb} MB usable"
+
+# ---- 3. show the picked disk and its real size -----------------------------
+db_subst kubeos/layout-disk-info DISK "$picked"
+db_subst kubeos/layout-disk-info SIZE "$(mb_to_gib "$disk_mb") GiB"
+db_subst kubeos/layout-disk-info USABLE "$(mb_to_gib "$usable_mb") GiB"
+db_fset kubeos/layout-disk-info seen false
+db_input medium kubeos/layout-disk-info || true
+db_go || { log "aborted at disk confirmation"; exit 1; }
+
+# ---- 4. swap, root, minfree, maxdata --------------------------------------
+ram_mib=$(awk '/^MemTotal:/ { printf "%d", $2 / 1024 }' /proc/meminfo)
+swap_default=$(( ram_mib * RAM_TO_SWAP / 1024 ))
+# if-then-else on purpose: "[ x ] && y" returns non-zero when the test is
+# false, and with set -e that would end the script.
+if [ "$swap_default" -gt "$SWAP_CAP_GIB" ]; then
+    swap_default=$SWAP_CAP_GIB
+fi
+if [ "$swap_default" -lt 1 ]; then
+    swap_default=1
+fi
+db_set kubeos/layout-swap "$swap_default"
+db_set kubeos/layout-minfree "$MINFREE_DEFAULT_GIB"
+maxdata_defaulted=0
+
+# Order is the user's: swap, root, minfree, maxdata. On a bad answer only that
+# answer is re-asked, so a wrong number never silently becomes a wrong layout.
+while : ; do
+    db_fset kubeos/layout-swap seen false
+    db_input high kubeos/layout-swap || true
+    db_go || { log "aborted at swap size"; exit 1; }
+    db_get kubeos/layout-swap
+    swap_gib=$RET
+    if ! is_uint "$swap_gib"; then bad_number "$swap_gib"; continue; fi
+
+    db_fset kubeos/layout-root seen false
+    db_input high kubeos/layout-root || true
+    db_go || { log "aborted at root size"; exit 1; }
+    db_get kubeos/layout-root
+    root_gib=$RET
+    if ! is_uint "$root_gib"; then bad_number "$root_gib"; continue; fi
+    if [ "$root_gib" -lt "$MIN_ROOT_GIB" ]; then
+        db_subst kubeos/layout-root-small MIN "$MIN_ROOT_GIB"
+        db_fset kubeos/layout-root-small seen false
+        db_input critical kubeos/layout-root-small || true
+        db_go || true
+        continue
+    fi
+
+    db_fset kubeos/layout-minfree seen false
+    db_input high kubeos/layout-minfree || true
+    db_go || { log "aborted at minfree"; exit 1; }
+    db_get kubeos/layout-minfree
+    minfree_gib=$RET
+    if ! is_uint "$minfree_gib"; then bad_number "$minfree_gib"; continue; fi
+
+    root_mb=$(gib_to_mb "$root_gib")
+    swap_mb=$(gib_to_mb "$swap_gib")
+    minfree_mb=$(gib_to_mb "$minfree_gib")
+    base_mb=$(( root_mb + swap_mb + minfree_mb ))
+    if [ "$base_mb" -gt "$usable_mb" ]; then
+        does_not_fit
+        continue
+    fi
+    left_mb=$(( usable_mb - base_mb ))
+    if [ "$left_mb" -lt "$(gib_to_mb "$MIN_DATA_GIB")" ]; then
+        db_subst kubeos/layout-data-small LEFT "$(mb_to_gib "$left_mb")"
+        db_subst kubeos/layout-data-small MIN "$MIN_DATA_GIB"
+        db_fset kubeos/layout-data-small seen false
+        db_input critical kubeos/layout-data-small || true
+        db_go || true
+        continue
+    fi
+
+    if [ "$maxdata_defaulted" -eq 0 ]; then
+        db_set kubeos/layout-maxdata "$(mb_to_gib "$left_mb")"
+        maxdata_defaulted=1
+    fi
+    db_fset kubeos/layout-maxdata seen false
+    db_input high kubeos/layout-maxdata || true
+    db_go || { log "aborted at maxdata"; exit 1; }
+    db_get kubeos/layout-maxdata
+    maxdata_gib=$RET
+    if ! is_uint "$maxdata_gib"; then bad_number "$maxdata_gib"; continue; fi
+    maxdata_mb=$(gib_to_mb "$maxdata_gib")
+    if [ "$maxdata_gib" -lt "$MIN_DATA_GIB" ]; then
+        db_subst kubeos/layout-data-small LEFT "$maxdata_gib"
+        db_subst kubeos/layout-data-small MIN "$MIN_DATA_GIB"
+        db_fset kubeos/layout-data-small seen false
+        db_input critical kubeos/layout-data-small || true
+        db_go || true
+        continue
+    fi
+    if [ "$maxdata_mb" -gt "$left_mb" ]; then
+        does_not_fit
+        continue
+    fi
+    break
+done
+
+# ---- 5. build the recipe ---------------------------------------------------
+# The LVM PV must NOT be written as 100%: decode_recipe() resolves a percentage
+# against RAM, not against the disk size (recipes.sh:
+#     elif expr "$1" : '[0-9][0-9]*%$' ; then min=$(($ram * ${1%?} / 100))
+# ). "100%" therefore makes the recipe's minimum equal to the machine's memory,
+# which on a small disk or a RAM-heavy VM pushes min_size above the free space;
+# choose_recipe() then logs "Available disk space too small for expert recipe;
+# skipping" and partman falls back to its interactive menus, which is the
+# confusing loop seen on 2026-11-09. An explicit "min factor -1" (unlimited max)
+# fills the disk with no such trap: min_size stays 1024 MB for the PV.
+# \${...} inside the string is escaped so partman receives its recipe variables.
+recipe="kubeos-layout ::
+    ${BOOT_MB} ${BOOT_MB} ${BOOT_MB} free
+        \$primary{ }
+        \$iflabel{ gpt }
+        method{ biosgrub }
+    .
+    ${EFI_MB} ${EFI_MB} ${EFI_MAX_MB} free
+        \$primary{ }
+        \$iflabel{ gpt }
+        \$reusemethod{ }
+        method{ efi }
+        format{ }
+    .
+    1024 4096 -1 \$default_filesystem
+        \$defaultignore{ }
+        \$primary{ }
+        method{ lvm }
+        vg_name{ ${VG} }
+    .
+"
+if [ "$swap_mb" -gt 0 ]; then
+    recipe="${recipe}    ${swap_mb} ${swap_mb} ${swap_mb} linux-swap
+        \$lvmok{ }
+        lv_name{ lv-swap }
+        in_vg{ ${VG} }
+        method{ swap }
+        format{ }
+    .
+"
+fi
+recipe="${recipe}    ${root_mb} ${root_mb} ${root_mb} ext4
+        \$lvmok{ }
+        lv_name{ lv-root }
+        in_vg{ ${VG} }
+        method{ format }
+        format{ }
+        use_filesystem{ }
+        filesystem{ ext4 }
+        mountpoint{ / }
+    .
+"
+
+# ---- 6. answer partman's own entry questions -------------------------------
+# 2026-11-09, fourth attempt. Two real bugs, both read out of the ISO's own
+# udebs (binary/pool-udeb/main/p/partman-*), not guessed:
+#
+#  (a) partman-base does NOT depend on partman-auto - its control file lists
+#      partman-utils, partman-partitioning, partman-target, archdetect,
+#      harddrive-detection, di-utils-mapdevfs and di-utils, while partman-auto
+#      lists partman-base as ITS dependency. anna therefore installs partman-auto
+#      AFTER this hook has run, so every db_set partman-auto/* below used to hit
+#      a question that did not exist yet and was dropped in silence. That is why
+#      each attempt since these answers left preseed.cfg ended on partman's own
+#      "Partitioning method" menu with the five answers apparently ignored.
+#      anna-install first, so the templates exist before anything is written.
+#
+#  (b) "lvm" is not a legal value for init_automatically_partition. ask_user
+#      prefixes every choice with its plugin directory (60some_device_lvm), and
+#      debconf_select only translates a value that equals that plugin name, with
+#      or without its leading two digits - so bare "lvm" can never match and the
+#      menu is drawn instead. The documented partman-auto/method + partman-auto/
+#      disk pair has no such trap: display.d/10initial_auto consumes it at line
+#      43 and then exits 0 unconditionally, so a failed auto-partition lands on
+#      the ordinary menu instead of spinning inside bin/partman's "continue 2"
+#      retry loop (the endless repaint seen on this VM).
+#
+#  (c) 2026-11-09, fifth attempt: the recipe must never travel through db_set.
+#      cdebconf's shell protocol is LINE based - confmodule's _db_cmd does
+#      printf '%s\n' "$*" >&3 and then reads exactly one reply line - so a
+#      multi-line value is not one command with newlines in it, it is a valid
+#      SET for its first line followed by a pile of garbage commands. The
+#      channel then desynchronises: every later db_get reads the *previous*
+#      command's reply, so the read-back below saw a wrong value, partman-base
+#      aborted with exit 10 and the installer showed "Installation step failed:
+#      Partition the storage devices (partman)" right after the last size
+#      question - with no dialog, because the critical message it tried to show
+#      travelled down the same broken channel. Recipes are multi-line by nature,
+#      and partman has a purpose-built interface for exactly this:
+#      partman-auto/expert_recipe_file, a *path* choose_recipe() reads the
+#      recipe from (recipes.sh: db_get expert_recipe; if non-empty it overrides
+#      the file, so expert_recipe is deliberately left untouched/empty).
+#
+# expert_recipe_file makes recipes.sh choose_recipe() return before it can show
+# the recipe menu, and guided_size is root+swap, NOT max: with max,
+# perform_recipe_by_lvm sets use_all and the last logical volume swallows the
+# whole volume group, which would leave maxdata nothing to take.
+# Every answer is read back at the end; if one did not stick the hook aborts with
+# a visible message instead of letting the user fall through to the stock menu.
+anna-install partman-auto partman-auto-lvm >/dev/null 2>&1 || true
+
+need_mb=$(( root_mb + swap_mb ))
+db_set partman-auto/method lvm
+# partman-auto/disk takes the device path; display.d/10initial_auto maps it to
+# partman's own device directory through dev_to_partman() and mapdevfs().
+db_set partman-auto/disk "$picked"
+db_set partman-partitioning/default_label gpt
+printf '%s\n' "$recipe" > "$RECIPE_FILE"
+db_set partman-auto/expert_recipe_file "$RECIPE_FILE"
+db_set partman-auto-lvm/no_boot true
+# seen=true as well: db_set alone leaves the question unseen, and auto_lvm_prepare
+# asks it as critical - the user would get an unexplained yes/no about /boot on
+# LVM. Marking it seen is what makes the answer silent (same effect as preseeding).
+db_fset partman-auto-lvm/no_boot seen true
+db_set partman-auto-lvm/guided_size "$(( need_mb + 1 ))MB"
+db_fset partman-auto-lvm/guided_size seen true
+db_fset partman-auto/choose_recipe seen true
+
+# A dropped answer is what cost four builds, so it must never be silent again.
+not_accepted() {
+    db_subst kubeos/layout-not-accepted QUESTION "$1"
+    db_subst kubeos/layout-not-accepted WANTED "$2"
+    db_subst kubeos/layout-not-accepted GOT "${3:-<empty>}"
+    db_fset kubeos/layout-not-accepted seen false
+    db_input critical kubeos/layout-not-accepted || true
+    db_go || true
+}
+
+# check_answer QUESTION WANTED
+check_answer() {
+    db_get "$1" || true
+    if [ "${RET:-}" != "$2" ]; then
+        log "ERROR partman did not accept $1 (wanted '$2', got '${RET:-}')"
+        not_accepted "$1" "$2" "${RET:-}"
+        exit 1
+    fi
+    log "confirmed $1 = $2"
+}
+
+check_answer partman-auto/method lvm
+check_answer partman-auto/disk "$picked"
+check_answer partman-auto/expert_recipe_file "$RECIPE_FILE"
+# The path may be accepted while the file behind it is missing or empty (a hook
+# that died half way, a /tmp that is not writable); choose_recipe() would then
+# find no recipe and fall through to its menu, which is the loop this hook exists
+# to prevent. So prove the file, not just the answer.
+if [ ! -s "$RECIPE_FILE" ]; then
+    log "ERROR $RECIPE_FILE is missing or empty: the recipe never reached the disk"
+    not_accepted partman-auto/expert_recipe_file "$RECIPE_FILE" "<no such file>"
+    exit 1
+fi
+db_get partman-auto-lvm/guided_size || true
+if [ -z "${RET:-}" ]; then
+    log "ERROR partman-auto-lvm/guided_size is empty"
+    not_accepted partman-auto-lvm/guided_size "$(( need_mb + 1 ))MB" ""
+    exit 1
+fi
+
+# ---- 7. hide the expert entries of partman's own menu ------------------------
+# partman draws one selectable entry per /lib/partman/choose_partition/<NNname>/
+# directory, and every storage udeb that is installed adds its own on top of the
+# device list: partman-auto "Guided partitioning", partman-md "Configure software
+# RAID", partman-lvm "Configure the Logical Volume Manager", partman-crypto
+# "Configure encrypted volumes", partman-iscsi "Configure iSCSI volumes" (and
+# partman-nbd where it is installed). KubeOS is a guided installer for one local
+# disk and asks its five questions above, so those entries are only a way for a
+# user to fall back into Debian's expert flow and undo the layout this hook just
+# chose. partman-base's own entries stay: the device list, its two dividers,
+# "Undo changes to partitions" and "Finish partitioning and write changes to
+# disk". Deleting the directory is enough - partman enumerates the parent at
+# display time, so a missing directory is simply an entry that is not offered.
+# Blacklist, not whitelist, on purpose: if a future Debian renumbers these, an
+# entry reappears (visible, harmless) instead of the Finish entry disappearing.
+# Keep in sync with partman-auto/md/lvm/nbd/crypto/iscsi (checked 2026-11-09 on
+# partman-auto 177, partman-md 114, partman-lvm 156, partman-nbd 0.77,
+# partman-crypto 134, partman-iscsi 83).
+for entry in 20auto 25md 30lvm 30nbd 35crypto 40iscsi; do
+    dir="/lib/partman/choose_partition/$entry"
+    if [ -d "$dir" ]; then
+        rm -rf "$dir"
+        log "hid partman menu entry $entry"
+    fi
+done
+
+# ---- 8. hand the storage numbers to first boot ------------------------------
+# /usr/bin/kubeos-storage-init builds the thin pool for pod data from whatever is
+# still free in the volume group, minus minfree ("the minimum amount of disk that
+# must stay unused"). It cannot guess minfree, so the answers have to reach the
+# installed system. They cannot be written there from here: partman's init.d runs
+# before /target is mounted. Instead they go to /tmp in the installer's own
+# environment, and preseed's late_command - the only later point where /target
+# exists and the same session is still running - copies the file into
+# /etc/kubeos/storage.conf.
+STORAGE_CONF=/tmp/kubeos-storage.conf
+{
+    echo "# KubeOS installer: disk-layout answers for THIS machine (06-kubeos-layout)."
+    echo "# Read by /usr/bin/kubeos-storage-init on first boot. Do not edit."
+    echo "VG=$VG"
+    echo "DATA_POOL=kubeos-data"
+    echo "DATA_LV=pod-data"
+    echo "DATA_MOUNT=/opt/local-path-provisioner"
+    echo "MAXDATA_GIB=$maxdata_gib"
+    echo "MINFREE_GIB=$minfree_gib"
+} > "$STORAGE_CONF"
+log "storage answers for first boot written to $STORAGE_CONF"
+
+mkdir -p "${FLAG%/*}"
+: > "$FLAG"
+
+log "layout: $picked root ${root_gib} GiB, swap ${swap_gib} GiB, maxdata ${maxdata_gib} GiB, minfree ${minfree_gib} GiB"
+log "recipe handed to partman: root ${root_mb} MB, swap ${swap_mb} MB, guided_size $(( need_mb + 1 )) MB"
+log "first boot sizes the thin pool from the VG's free space minus ${minfree_gib} GiB; maxdata recorded as ${maxdata_gib} GiB"
+exit 0

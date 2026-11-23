@@ -1,0 +1,26 @@
+KubeOS
+Copyright 2026 KubeOS contributors
+
+KubeOS is licensed under the Apache License, Version 2.0. The licence text is in the
+LICENSE file next to this one.
+
+KubeOS is not affiliated with, endorsed by, or sponsored by the Kubernetes project, the
+Cloud Native Computing Foundation, the Debian project, or the Headlamp maintainers. The
+name "KubeOS" and the KubeOS marks identify this distribution only.
+
+What KubeOS builds and ships
+----------------------------
+
+The ISO contains three kinds of software, and their notices travel with them:
+
+  * this project's own work - the build hooks, the first-boot scripts and the helper
+    commands, licensed Apache-2.0 under LICENSE;
+  * the KubeOS dashboard (Headlamp plus the KubeOS gateway, console and plugin) - its
+    own notices are installed on every node in /usr/share/doc/kubeos-dashboard/ when
+    the dashboard is installed;
+  * Debian packages, and the control-plane binaries vendored into the image. Those carry
+    their own copyright files: /usr/share/doc/*/copyright for packages, and
+    /usr/share/doc/kubeos-control-plane/ for the vendored Kubernetes and etcd binaries.
+
+See docs/LICENSES.md for the full list, and for where the source code of every component
+can be obtained.

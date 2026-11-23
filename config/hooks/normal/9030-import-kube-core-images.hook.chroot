@@ -1,0 +1,136 @@
+#!/bin/sh
+# KubeOS hook 9030: import the container images the platform needs.
+#
+# WHEN   chroot stage, after the package install, before the binary stage.
+# WHY    An installed node must be able to start its control plane and CNI
+#        without internet access, so the images are baked into the ISO's
+#        containerd store instead of being pulled at first boot.
+# SAFE   Re-runnable: the same tags are simply re-pulled from the local store.
+# NEEDS  The build host must reach registry.k8s.io to pull the sandbox image (see
+#        AGENTS.md 16.6 item 3): this hook bypasses the apt proxy. It used to pull
+#        ~1.5 GB from quay.io and registry.k8s.io; since the migration it is one
+#        image of ~300 kB.
+#
+# Note on the sandbox snapshotters: starting containerd inside a chroot fails on
+# snapshotter plugins that need real host mount information (btrfs, devmapper,
+# zfs), so only those three are disabled here. Everything else stays default.
+set -eu
+
+SOCK=/run/containerd/containerd.sock
+TMP_CONF=/tmp/containerd-hook.toml
+LOG=/tmp/containerd-hook.log
+# Since the 2026-11-11 "no base Pods" migration (docs/NATIVE-CONTROL-PLANE.md) the
+# control plane, the CNI and cluster DNS run from /usr/local/bin, so none of their
+# images is needed any more - Calico, metrics-server and local-path-provisioner are
+# no longer baked, and their version constants went with them. That last one stays
+# gone for good: since 2026-11-11 dynamic storage is a host service
+# (usr/bin/kubeos-storage-provisioner) and it deliberately has no image, which is
+# the whole reason it replaced upstream's helper-Pod design.
+# What is still unavoidable is the pod sandbox: every container, including the user's, starts
+# inside the pause image, whose tag is read from kubeadm at the bottom of this file.
+
+log() { echo "kubeos 9030: $*"; }
+
+# retry CMD... : try a network operation up to five times, ten seconds apart.
+retry() {
+    n=0
+    until "$@"; do
+        n=$((n + 1))
+        if [ "$n" -ge 5 ]; then
+            log "giving up after 5 attempts: $*"
+            return 1
+        fi
+        log "retry $n/5: $*"
+        sleep 10
+    done
+}
+
+command -v containerd >/dev/null 2>&1 || { log "ERROR containerd is not installed"; exit 1; }
+command -v kubeadm >/dev/null 2>&1 || { log "ERROR kubeadm is not installed"; exit 1; }
+
+# live-build normally has /proc mounted already; mount it only if it is missing,
+# and remember that we did so cleanup does not unmount the builder's own /proc.
+MOUNTED_PROC=0
+if ! mountpoint -q /proc; then
+    mount -t proc proc /proc
+    MOUNTED_PROC=1
+fi
+
+# cleanup runs on every exit path, including a signal, so no containerd process
+# and no stray /proc mount is left behind for the next stage.
+CPID=""
+# The body only runs from the traps below, which shellcheck does not follow.
+# shellcheck disable=SC2317
+cleanup() {
+    if [ -n "$CPID" ]; then
+        kill "$CPID" 2>/dev/null || true
+        wait "$CPID" 2>/dev/null || true
+        CPID=""
+    fi
+    if [ "$MOUNTED_PROC" -eq 1 ]; then
+        umount /proc || true
+        MOUNTED_PROC=0
+    fi
+    return 0
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+mkdir -p /run/containerd /var/lib/containerd
+rm -f "$SOCK"
+
+# Generate the config for the containerd version that is actually installed
+# (never hand-write it: the format differs between containerd 1.x and 2.x).
+containerd config default > "$TMP_CONF"
+DISABLED='disabled_plugins = ["io.containerd.snapshotter.v1.btrfs", "io.containerd.snapshotter.v1.devmapper", "io.containerd.snapshotter.v1.zfs"]'
+if grep -q '^disabled_plugins' "$TMP_CONF"; then
+    sed -i "s|^disabled_plugins.*|$DISABLED|" "$TMP_CONF"
+else
+    sed -i "1i $DISABLED" "$TMP_CONF"
+fi
+
+log "starting containerd with the chroot-safe config"
+containerd --config "$TMP_CONF" > "$LOG" 2>&1 &
+CPID=$!
+
+# Wait for the socket rather than sleeping a fixed time (up to 60 s).
+i=0
+while [ ! -S "$SOCK" ]; do
+    i=$((i + 1))
+    if [ "$i" -ge 60 ]; then
+        log "ERROR containerd did not create $SOCK within 60 s:"
+        cat "$LOG"
+        exit 1
+    fi
+    sleep 1
+done
+
+# The pod sandbox image. Its tag is whatever the installed kubeadm expects, so it is
+# read from kubeadm rather than hardcoded: the kubelet asks containerd for exactly
+# that reference and would pull it at first boot on a node with no internet.
+PAUSE_IMAGE="$(kubeadm config images list 2>/dev/null | grep '/pause:' | head -n 1)"
+[ -n "$PAUSE_IMAGE" ] || { log "ERROR kubeadm printed no pause image"; exit 1; }
+
+# Since 2026-11-19 the image arrives as a package (kubeos-pause-image), so the normal
+# path is an import of a local OCI archive: no registry, no network, and the tag moves
+# with apt instead of with a new ISO. The pull below stays as the fallback for a build
+# without that package.
+PAUSE_ARCHIVE=/usr/share/kubeos/pause/pause.tar
+if [ -f "$PAUSE_ARCHIVE" ]; then
+    log "importing the pod sandbox image from $PAUSE_ARCHIVE"
+    ctr -n k8s.io images import "$PAUSE_ARCHIVE" >/dev/null \
+        || { log "ERROR ctr could not import $PAUSE_ARCHIVE"; exit 1; }
+else
+    log "pulling the pod sandbox image ${PAUSE_IMAGE} (kubeos-pause-image is not installed)"
+    retry ctr -n k8s.io image pull "$PAUSE_IMAGE"
+fi
+
+# Either way, prove the exact reference the kubelet will ask for is in the store now,
+# instead of shipping an ISO that only fails at first boot.
+ctr -n k8s.io images ls -q | grep -qx "$PAUSE_IMAGE" \
+    || { log "ERROR ${PAUSE_IMAGE} is not in the containerd store"; exit 1; }
+log "sandbox image ready: ${PAUSE_IMAGE}"
+
+log "done: images are in the chroot's containerd store"
+exit 0
